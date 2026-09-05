@@ -6,7 +6,7 @@ const { URL } = require('url');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
-// Konfiguratsiyani yuklash (fayldan yoki Environment Variables dan)
+// Konfiguratsiyani yuklash
 function loadConfig() {
   let fileConfig = {};
   if (fs.existsSync(CONFIG_PATH)) {
@@ -17,16 +17,9 @@ function loadConfig() {
   return {
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || fileConfig.TELEGRAM_BOT_TOKEN || "",
     GEMINI_API_KEY: process.env.GEMINI_API_KEY || fileConfig.GEMINI_API_KEY || "",
-    ALLOWED_USER_IDS: process.env.ALLOWED_USER_IDS 
-      ? process.env.ALLOWED_USER_IDS.split(',').map(id => Number(id.trim())) 
-      : (fileConfig.ALLOWED_USER_IDS || [])
+    // Barcha foydalanuvchilar ishlata olishi uchun cheklov o'chirildi
+    ALLOWED_USER_IDS: []
   };
-}
-
-function saveConfig(cfg) {
-  try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf-8');
-  } catch (e) {}
 }
 
 let config = loadConfig();
@@ -36,11 +29,11 @@ if (!config.TELEGRAM_BOT_TOKEN || config.TELEGRAM_BOT_TOKEN.includes("BOT_TOKENI
   process.exit(1);
 }
 
-// Bepul bulutli serverlar (Render, Koyeb va h.k.) uchun yengil HTTP healthcheck server
+// Bulutli serverlar uchun HTTP server
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end('<h3>Telegram AI Bot 24/7 faol ishlab turibdi! 🚀</h3>');
+  res.end('<h3>Telegram AI Bot (Matn + Ovoz + Rasm) faol ishlab turibdi! 🚀</h3>');
 }).listen(PORT, () => {
   console.log(`Cloud HTTP Server ${PORT}-portda ishlamoqda.`);
 });
@@ -49,7 +42,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}`;
 const TELEGRAM_FILE_API = `https://api.telegram.org/file/bot${config.TELEGRAM_BOT_TOKEN}`;
 const userHistories = new Map();
 
-// IPv4 orqali xavfsiz va tezkor HTTPS so'rov yuboruvchi asosiy funksiya
+// IPv4 orqali HTTPS so'rov
 function httpsRequest(urlStr, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(urlStr);
@@ -71,7 +64,7 @@ function httpsRequest(urlStr, options = {}, body = null) {
       path: parsed.pathname + parsed.search,
       method: options.method || (body ? 'POST' : 'GET'),
       headers: headers,
-      family: 4, // Har doim IPv4 (tarmoq uzilishining oldini oladi)
+      family: 4,
       timeout: options.timeout || 45000,
     }, (res) => {
       const chunks = [];
@@ -94,17 +87,10 @@ function httpsRequest(urlStr, options = {}, body = null) {
       });
     });
 
-    req.on('timeout', () => {
-      req.destroy(new Error('Ulanish vaqti tugadi (Timeout)'));
-    });
+    req.on('timeout', () => req.destroy(new Error('Timeout')));
+    req.on('error', reject);
 
-    req.on('error', (err) => {
-      reject(err);
-    });
-
-    if (payload) {
-      req.write(payload);
-    }
+    if (payload) req.write(payload);
     req.end();
   });
 }
@@ -126,10 +112,9 @@ async function downloadTelegramFileAsBase64(filePath) {
   const url = `${TELEGRAM_FILE_API}/${filePath}`;
   const res = await httpsRequest(url, { method: 'GET', timeout: 60000 });
   if (res.statusCode !== 200) {
-    throw new Error(`Ovoz faylini yuklab bo'lmadi (HTTP ${res.statusCode})`);
+    throw new Error(`Faylni yuklab bo'lmadi (HTTP ${res.statusCode})`);
   }
-  const buffer = res.buffer();
-  return buffer.toString('base64');
+  return res.buffer().toString('base64');
 }
 
 // Xabarni bo'laklab yuborish
@@ -152,7 +137,7 @@ async function sendLongMessage(chatId, text) {
   }
 }
 
-// Harakat holatini yuborish (typing yoki record_voice)
+// Harakat holati
 async function sendChatAction(chatId, action = 'typing') {
   await telegramRequest('sendChatAction', {
     chat_id: chatId,
@@ -160,7 +145,7 @@ async function sendChatAction(chatId, action = 'typing') {
   });
 }
 
-// Mavjud modellar (zaxira bilan)
+// Modellar ro'yxati
 const AVAILABLE_MODELS = [
   'gemini-3.5-flash-lite',
   'gemini-flash-lite-latest',
@@ -168,7 +153,66 @@ const AVAILABLE_MODELS = [
   'gemini-3.6-flash'
 ];
 
-// Gemini API chaqiruvi (Matn yoki Ovoz bilan)
+// Gemini orqali rasm promptini (inglizcha chizish tavsifini) yaratish
+async function generateImagePromptWithGemini(userText) {
+  const apiKey = config.GEMINI_API_KEY;
+  const prompt = `Foydalanuvchi rasm chizishni so'ramoqda: "${userText}".
+Ushbu so'rov asosida sun'iy intellekt (Flux/Midjourney) uchun professional, yuqori sifatli, batafsil INGLIZCHA prompt tuzib ber.
+Javobda FAQAT INGLIZCHA PROMPT matnini qaytar, hech qanday ortiqcha so'z, izoh yoki tirnoqsiz bo'lsin.
+Masalan: Cyberpunk night Tashkent city, futuristic Chorsu bazaar dome with neon lights, flying cars, hyperdetailed, 8k, cinematic lighting.`;
+
+  for (const modelName of AVAILABLE_MODELS) {
+    try {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+      const res = await httpsRequest(endpoint, { method: 'POST', timeout: 30000 }, {
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.7, maxOutputTokens: 250 }
+      });
+      const data = res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (text) return text.replace(/["\n\r]/g, ' ').trim();
+    } catch (e) {}
+  }
+  return userText;
+}
+
+// Rasm yaratish va Telegramga yuborish
+async function handleImageGeneration(chatId, promptText) {
+  await sendChatAction(chatId, 'upload_photo');
+  const actionInterval = setInterval(() => sendChatAction(chatId, 'upload_photo'), 3500);
+
+  try {
+    // 1. Promptni boyitish
+    const englishPrompt = await generateImagePromptWithGemini(promptText);
+    const cleanPrompt = encodeURIComponent(englishPrompt);
+    const seed = Math.floor(Math.random() * 999999);
+    const imageUrl = `https://image.pollinations.ai/prompt/${cleanPrompt}?width=1024&height=1024&nologo=true&seed=${seed}`;
+
+    console.log(`Rasm yaratilmoqda: ${englishPrompt}`);
+
+    // 2. Telegram orqali yuborish
+    const res = await telegramRequest('sendPhoto', {
+      chat_id: chatId,
+      photo: imageUrl,
+      caption: `🎨 **Siz so'ragan rasm tayyorlandi!**\n\n📝 *Tavsif:* ${englishPrompt.slice(0, 300)}`
+    });
+
+    clearInterval(actionInterval);
+
+    if (!res.ok) {
+      throw new Error(res.description || "Rasmni yuborib bo'lmadi");
+    }
+  } catch (err) {
+    clearInterval(actionInterval);
+    console.error("Rasm yaratish xatosi:", err.message);
+    await telegramRequest('sendMessage', {
+      chat_id: chatId,
+      text: `Kechirasiz, rasm yaratishda xatolik yuz berdi: ${err.message}`
+    });
+  }
+}
+
+// Gemini API chaqiruvi (Matn, Ovoz yoki Rasm tahlili bilan)
 async function askGemini(chatId, userParts, historyDescription = "") {
   const apiKey = config.GEMINI_API_KEY;
   if (!apiKey || apiKey.includes("GEMINI_API_KALITINGIZNI")) {
@@ -191,7 +235,7 @@ async function askGemini(chatId, userParts, historyDescription = "") {
     systemInstruction: {
       parts: [
         {
-          text: "Sen foydalanuvchining shaxsiy sun'iy intellekt assistentisan. Foydalanuvchi Telegram orqali yozma yoki ovozli xabarlar yuboradi. Agar ovoz yuborilsa, ovozni diqqat bilan eshitib, undagi barcha talablarni to'liq tushun va o'zbek tilida juda aniq, chuqur va chiroyli javob qaytar."
+          text: "Sen har tomonlama aqlli, do'stona va mohir sun'iy intellekt assistentisan. Foydalanuvchi yozma, ovozli xabarlar yoki rasmlar yuboradi. Har qanday savol va topshiriqqa o'zbek tilida to'liq, ravon, professional va chiroyli javob ber."
         }
       ]
     },
@@ -217,10 +261,9 @@ async function askGemini(chatId, userParts, historyDescription = "") {
       if (data.candidates?.[0]?.content?.parts?.[0]?.text) {
         const answer = data.candidates[0].content.parts[0].text;
 
-        // Xotiraga saqlash
         history.push({
           role: "user",
-          parts: [{ text: historyDescription || userParts[0].text || "[Ovozli xabar]" }]
+          parts: [{ text: historyDescription || userParts[0].text || "[Xabar]" }]
         });
         history.push({
           role: "model",
@@ -235,17 +278,27 @@ async function askGemini(chatId, userParts, historyDescription = "") {
       }
 
       if (data.error) {
-        console.warn(`[${modelName}] xatolik (${data.error.code}): ${data.error.message}`);
         lastErrorMessage = data.error.message;
         continue;
       }
     } catch (err) {
-      console.warn(`[${modelName}] tarmoq xatosi:`, err.message);
       lastErrorMessage = err.message;
     }
   }
 
   return `Kechirasiz, sun'iy intellekt serverlarida vaqtinchalik yuklama yuqori. Qayta urinib ko'ring.\n(Xatolik: ${lastErrorMessage})`;
+}
+
+// Foydalanuvchi rasm chizishni so'rayaptimi?
+function isImageDrawingRequest(text) {
+  const t = text.toLowerCase();
+  if (t.startsWith('/image') || t.startsWith('/rasm') || t.startsWith('/draw')) return true;
+  if (t.includes('rasm chiz') || t.includes('rasm yarat') || t.includes('chizib ber') || 
+      t.includes('rasmini chiz') || t.includes('rasm tayyorla') || t.includes('tasvirla') || 
+      t.includes('rasm chiqar') || t.includes('rasmini yarat')) {
+    return true;
+  }
+  return false;
 }
 
 // Xabarni tahlil qilish
@@ -255,47 +308,79 @@ async function handleUpdate(update) {
   const msg = update.message;
   const chatId = msg.chat.id;
   const fromUser = msg.from.first_name || "Foydalanuvchi";
-  const userId = msg.from.id;
 
-  // Xavfsizlik
-  if (config.ALLOWED_USER_IDS && config.ALLOWED_USER_IDS.length > 0) {
-    if (!config.ALLOWED_USER_IDS.includes(userId)) {
+  // 1. RASM QABUL QILISH VA TAHLIL QILISH (VISION)
+  if (msg.photo && msg.photo.length > 0) {
+    const photo = msg.photo[msg.photo.length - 1]; // Eng yuqori sifatlisi
+    console.log(`[Rasm keldi - ${fromUser}]`);
+
+    await sendChatAction(chatId, 'typing');
+    const actionInterval = setInterval(() => sendChatAction(chatId, 'typing'), 3500);
+
+    try {
+      const fileInfo = await telegramRequest('getFile', { file_id: photo.file_id });
+      if (!fileInfo.ok || !fileInfo.result?.file_path) {
+        throw new Error("Rasm manzilini olib bo'lmadi.");
+      }
+
+      const base64Photo = await downloadTelegramFileAsBase64(fileInfo.result.file_path);
+      const caption = msg.caption ? msg.caption.trim() : "Ushbu rasmni batafsil tahlil qil va nima tasvirlanganini o'zbek tilida aytib ber.";
+
+      // Agar rasm asosida yangi rasm chizish/o'zgartirish so'ralgan bo'lsa
+      if (/o'zgartir|tahrir|yangi rasm|kiberpank|uslub|boshqacha qilib/i.test(caption)) {
+        clearInterval(actionInterval);
+        await telegramRequest('sendMessage', {
+          chat_id: chatId,
+          text: "Rasm tahlil qilinmoqda va yangi varianti chizilmoqda, kuting..."
+        });
+        await handleImageGeneration(chatId, caption);
+        return;
+      }
+
+      const userParts = [
+        {
+          inlineData: {
+            mimeType: "image/jpeg",
+            data: base64Photo
+          }
+        },
+        {
+          text: `Foydalanuvchi rasm yubordi. Xabar matni: "${caption}". Ushbu rasmni diqqat bilan ko'rib, foydalanuvchining savoliga yoki iltimosiga to'liq o'zbek tilida javob ber.`
+        }
+      ];
+
+      const answer = await askGemini(chatId, userParts, `[Rasm: ${caption}]`);
+      clearInterval(actionInterval);
+      await sendLongMessage(chatId, answer);
+    } catch (err) {
+      clearInterval(actionInterval);
+      console.error("Rasmni tahlil qilishda xatolik:", err);
       await telegramRequest('sendMessage', {
         chat_id: chatId,
-        text: "Kechirasiz, bu bot shaxsiy bot hisoblanadi."
+        text: `Rasmni tahlil qilishda xatolik yuz berdi: ${err.message}`
       });
-      return;
     }
-  } else {
-    config.ALLOWED_USER_IDS = [userId];
-    saveConfig(config);
-    console.log(`Bot egasi saqlandi! Telegram ID: ${userId}`);
+    return;
   }
 
-  // 1. OVOZLI XABARLAR
+  // 2. OVOZLI XABARLAR
   if (msg.voice || msg.audio) {
     const audioObj = msg.voice || msg.audio;
     const isVoice = !!msg.voice;
     console.log(`[Ovoz keldi - ${fromUser}]: Davomiyligi ${audioObj.duration} soniya`);
 
     await sendChatAction(chatId, 'record_voice');
-    const actionInterval = setInterval(() => {
-      sendChatAction(chatId, 'record_voice');
-    }, 3500);
+    const actionInterval = setInterval(() => sendChatAction(chatId, 'record_voice'), 3500);
 
     try {
-      // 1. Fayl manzilini olish
       const fileInfo = await telegramRequest('getFile', { file_id: audioObj.file_id });
       if (!fileInfo.ok || !fileInfo.result?.file_path) {
         throw new Error("Telegram'dan fayl manzilini olib bo'lmadi.");
       }
 
-      // 2. Faylni yuklab olish
-      console.log(`Ovoz yuklab olinmoqda: ${fileInfo.result.file_path}...`);
       const base64Audio = await downloadTelegramFileAsBase64(fileInfo.result.file_path);
       const mimeType = audioObj.mime_type || (isVoice ? 'audio/ogg' : 'audio/mp3');
 
-      const caption = msg.caption ? ` (Izoh: ${msg.caption})` : "";
       const userParts = [
         {
           inlineData: {
@@ -304,17 +389,25 @@ async function handleUpdate(update) {
           }
         },
         {
-          text: `Foydalanuvchi ovozli xabar yubordi${caption}. Ushbu audio faylni diqqat bilan eshitib, undagi barcha gaplar, savol yoki topshiriqlarni tushun va o'zbek tilida to'liq, mukammal javob ber.`
+          text: "Foydalanuvchi ovozli xabar yubordi. Ushbu audio faylni diqqat bilan eshitib, undagi topshiriqni tushun va o'zbek tilida to'liq javob ber."
         }
       ];
 
-      console.log("Ovoz Gemini ga tahlil uchun yuborilmoqda...");
-      const answer = await askGemini(chatId, userParts, `[Ovozli xabar${caption}]`);
+      const answer = await askGemini(chatId, userParts, "[Ovozli xabar]");
       clearInterval(actionInterval);
-      await sendLongMessage(chatId, `🎤 **Ovozli xabaringiz tahlil qilindi:**\n\n${answer}`);
+
+      // Agar ovoz orqali rasm chizish so'ralgan bo'lsa
+      if (isImageDrawingRequest(answer)) {
+        await telegramRequest('sendMessage', {
+          chat_id: chatId,
+          text: `🎤 **Ovozingiz eshitildi.** Rasm tayyorlanmoqda...`
+        });
+        await handleImageGeneration(chatId, answer);
+      } else {
+        await sendLongMessage(chatId, `🎤 **Ovozli xabaringiz javobi:**\n\n${answer}`);
+      }
     } catch (err) {
       clearInterval(actionInterval);
-      console.error("Ovozni qayta ishlashda xatolik:", err);
       await telegramRequest('sendMessage', {
         chat_id: chatId,
         text: `Ovozli xabarni tahlil qilishda xatolik yuz berdi: ${err.message}`
@@ -323,16 +416,19 @@ async function handleUpdate(update) {
     return;
   }
 
-  // 2. MATNLI XABARLAR
+  // 3. MATNLI XABARLAR
   if (msg.text) {
     const text = msg.text.trim();
     console.log(`[Matn keldi - ${fromUser}]: ${text}`);
 
     if (text === '/start') {
       const welcome = `Assalomu alaykum, ${fromUser}!\n\n` +
-        `Men sizning shaxsiy sun'iy intellekt botingizman.\n\n` +
-        `✍️ **Matn orqali:** Xohlagan savol yoki topshiriqni yozing.\n` +
-        `🎤 **Ovoz orqali:** Mikrofon tugmasini bosib gapiring — bot ovozingizni tushunib javob qaytaradi!\n\n` +
+        `Men sizning ko'p qirrali sun'iy intellekt botingizman.\n\n` +
+        `✨ **Imkoniyatlar:**\n` +
+        `✍️ **Matnli savol-javob:** Xohlagan mavzuda savol bering yoki topshiriq yozing.\n` +
+        `🎤 **Ovozli xabar:** Mikrofonni bosib gapiring — ovozingizni tushunaman.\n` +
+        `🎨 **Rasm chizish:** «Menga kiberpank Toshkent rasmini chizib ber» yoki «/rasm kosmosdagi mushuk» deb yozing — tayyor rasm chizib beraman!\n` +
+        `🖼️ **Rasm tahlili:** Botga rasm yuboring, uni tahlil qilib, tushuntirib yoki tahrirlab beraman.\n\n` +
         `Buyruqlar:\n` +
         `/clear — Xotirani tozalash\n` +
         `/help — Yordam`;
@@ -344,21 +440,38 @@ async function handleUpdate(update) {
       userHistories.delete(chatId);
       await telegramRequest('sendMessage', {
         chat_id: chatId,
-        text: "Xotira tozalandi! Yangi mavzuda topshiriq yuborishingiz mumkin."
+        text: "Xotira tozalandi! Yangi mavzuda savol yoki rasm so'rashingiz mumkin."
       });
       return;
     }
 
     if (text === '/help') {
-      const helpText = `Qo'llanma:\n\n• Matn yoki ovozli xabar (mikrofon) orqali topshiriq yuboring.\n• Bot ikkalasini ham tushunadi va bajaradi.\n• /clear — Xotirani tozalash.`;
+      const helpText = `Qo'llanma:\n\n• Rasm chizish uchun: «Menga ... rasmini chizib ber» yoki «/rasm ...» deb yozing.\n• Rasm tahlili: Istalgan rasmni botga yuboring.\n• Ovozli xabar: Mikrofon orqali gapiring.\n• /clear — Xotirani tozalash.`;
       await telegramRequest('sendMessage', { chat_id: chatId, text: helpText });
       return;
     }
 
+    // A) Agar foydalanuvchi rasm chizishni so'ragan bo'lsa
+    if (isImageDrawingRequest(text)) {
+      let promptToDraw = text
+        .replace(/^\/(image|rasm|draw)\s*/i, '')
+        .replace(/(menga|iltimos|rasm chiz|rasm yarat|chizib ber|rasmini chiz|rasmini yarat|tayyorlab ber)/gi, '')
+        .trim();
+
+      if (!promptToDraw) promptToDraw = text;
+
+      await telegramRequest('sendMessage', {
+        chat_id: chatId,
+        text: "🎨 Rasm tayyorlanmoqda, bir necha soniya kuting..."
+      });
+
+      await handleImageGeneration(chatId, promptToDraw);
+      return;
+    }
+
+    // B) Oddiy savol-javob
     await sendChatAction(chatId, 'typing');
-    const actionInterval = setInterval(() => {
-      sendChatAction(chatId, 'typing');
-    }, 3500);
+    const actionInterval = setInterval(() => sendChatAction(chatId, 'typing'), 3500);
 
     try {
       const userParts = [{ text: text }];
@@ -379,8 +492,8 @@ async function handleUpdate(update) {
 let offset = 0;
 async function startPolling() {
   console.log("=================================================");
-  console.log("Telegram AI Bot (IPv4, Matn + Ovoz) ishga tushdi!");
-  console.log("Xabarlar va ovozli topshiriqlar kutilmoqda...");
+  console.log("Telegram AI Bot (Ovoz, Rasm, Vision) ishga tushdi!");
+  console.log("Barcha foydalanuvchilar uchun ochiq!");
   console.log("=================================================");
 
   while (true) {
