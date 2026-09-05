@@ -1,0 +1,14 @@
+{
+  "name": "telegram-ai-bot",
+  "version": "1.0.0",
+  "description": "Telegram AI Assistant Bot powered by Google Gemini",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["telegram", "gemini", "ai", "bot"],
+  "license": "MIT"
+}
