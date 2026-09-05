@@ -9,6 +9,19 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["telegram", "gemini", "ai", "bot"],
+  "dependencies": {
+    "docx": "^8.5.0",
+    "exceljs": "^4.4.0",
+    "pptxgenjs": "^3.12.0"
+  },
+  "keywords": [
+    "telegram",
+    "gemini",
+    "ai",
+    "bot",
+    "word",
+    "excel",
+    "powerpoint"
+  ],
   "license": "MIT"
 }
